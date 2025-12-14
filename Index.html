@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Positionsgrößen-Rechner (Rendite-Spezialisten Gold default)</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:1100px;margin:18px auto;padding:16px;color:#111}
+    h1{margin:0 0 10px}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .card{border:1px solid #ddd;padding:12px;border-radius:8px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.03)}
+    input,select,button{padding:8px;border-radius:6px;border:1px solid #ccc}
+    label{display:block;margin:8px 0 4px;font-size:0.9rem}
+    #chart{height:420px}
+    .muted{color:#666;font-size:0.9rem}
+    .result{margin-top:12px;padding:12px;border-radius:6px;background:#f7f7f8}
+    .flex-between{display:flex;justify-content:space-between;align-items:center}
+    .small{font-size:0.9rem}
+    footer{margin-top:18px;color:#666;font-size:0.85rem}
+    @media(max-width:700px){.row{flex-direction:column}}
+  </style>
+  <!-- Lightweight Charts CDN -->
+  <script src="https://unpkg.com/lightweight-charts@4.0.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <h1>Positionsgrößen-Rechner</h1>
+  <p class="muted">Gib ein Kürzel ein, trage Deinen Alpha Vantage API-Key ein und klicke auf <strong>Abfragen</strong>. Die Seite zeigt aktuellen Kurs, Jahres-Tageskerzen und berechnet eine Positionsgröße. Default: <em>Maximal 10%</em> des Depots (Vorgabe Rendite-Spezialisten Gold). Du kannst Stop-Loss, Depotgröße und Risiko anpassen.</p>
+
+  <div class="row">
+    <div class="card" style="flex:1;min-width:300px">
+      <label for="apikey">Alpha Vantage API-Key</label>
+      <input id="apikey" placeholder="Trage hier Deinen Alpha Vantage API Key ein" style="width:100%" />
+
+      <label for="symbol">Aktienkürzel (z. B. AAPL, MSFT, ADS.DE)</label>
+      <input id="symbol" placeholder="Ticker (z. B. AAPL oder ADS.DE)" style="width:100%" />
+
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="fetchBtn">Abfragen</button>
+        <button id="resetBtn" type="button">Zurücksetzen</button>
+      </div>
+
+      <div style="margin-top:10px">
+        <label for="portfolio">Depotgröße (EUR)</label>
+        <input id="portfolio" type="number" value="50000" />
+
+        <label for="maxPercent">Max. Positionsanteil (Standard: 10%)</label>
+        <input id="maxPercent" type="number" value="10" />
+
+        <label for="riskPercent">Riskieren pro Trade (%) (Standard: 1%)</label>
+        <input id="riskPercent" type="number" value="1" />
+
+        <label for="stopType">Stop-Loss Eingabe</label>
+        <select id="stopType">
+          <option value="price">Stop-Loss als Kurs</option>
+          <option value="pct">Stop-Loss als %-Distanz</option>
+        </select>
+        <input id="stopValue" placeholder="z. B. 90 (Kurs) oder 5 (%)" />
+      </div>
+    </div>
+
+    <div class="card" style="flex:2;min-width:350px">
+      <div class="flex-between">
+        <div>
+          <div class="small">Ticker:</div>
+          <h2 id="symbolDisplay">—</h2>
+          <div class="muted small">Aktueller Kurs: <strong id="currentPrice">—</strong></div>
+        </div>
+        <div style="text-align:right">
+          <div class="small">Letztes Update</div>
+          <div id="lastUpdate" class="muted">—</div>
+        </div>
+      </div>
+
+      <div id="chart" style="margin-top:12px"></div>
+
+      <div class="result" id="calcResult">
+        <strong>Ergebnis</strong>
+        <div id="resultText" style="margin-top:8px">Noch keine Abfrage.</div>
+      </div>
+
+      <div class="muted small" style="margin-top:10px">
+        Hinweise: Die Positionsvorschläge basieren auf Deinen Eingaben. Standardmäßig ist der Anteil pro Aktie auf 10% gesetzt (Vorgabe Rendite-Spezialisten Gold). Stop-Loss sollte bewusst gewählt werden. Für Produktion: API-Limits & Caching beachten.
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Quellen: Rendite-Spezialisten (Gold / FAQ) und allgemeine Positionsgrößen-Praxis. Datenquelle: Alpha Vantage (TIME_SERIES_DAILY_ADJUSTED). Chart: TradingView lightweight-charts. 
+  </footer>
+
+<script>
+(async function(){
+  const fetchBtn = document.getElementById('fetchBtn');
+  const resetBtn = document.getElementById('resetBtn');
+
+  let chart = null, candleSeries = null;
+
+  function formatCurrency(x){
+    if(x === null || x === undefined) return '—';
+    return Number(x).toLocaleString('de-DE', {style:'currency',currency:'EUR',maximumFractionDigits:2});
+  }
+
+  function createChart(){
+    const chartContainer = document.getElementById('chart');
+    chartContainer.innerHTML = ''; // reset
+    chart = LightweightCharts.createChart(chartContainer, {width: chartContainer.clientWidth, height:420, layout: {backgroundColor: '#ffffff', textColor: '#333'}, timeScale:{timeVisible:true, secondsVisible:false}});
+    candleSeries = chart.addCandlestickSeries();
+    window.addEventListener('resize', ()=>chart.applyOptions({width: chartContainer.clientWidth}));
+  }
+
+  function parseAlphaDaily(json){
+    // Alpha Vantage TIME_SERIES_DAILY or DAILY_ADJUSTED returns:
+    // "Time Series (Daily)": { "2025-12-12": {"1. open":"...","2. high":"...", ... }, ... }
+    const key = Object.keys(json).find(k => k.includes('Time Series'));
+    if(!key) return null;
+    const raw = json[key];
+    const arr = [];
+    for(const dateStr in raw){
+      const v = raw[dateStr];
+      arr.push({
+        time: dateStr,
+        open: parseFloat(v['1. open']),
+        high: parseFloat(v['2. high']),
+        low: parseFloat(v['3. low']),
+        close: parseFloat(v['4. close'])
+      });
+    }
+    // sort ascending by date
+    arr.sort((a,b)=> (a.time > b.time?1:-1));
+    return arr;
+  }
+
+  async function fetchAlphaTimeSeries(symbol, apiKey){
+    const base = 'https://www.alphavantage.co/query';
+    const url = `${base}?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(symbol)}&outputsize=full&apikey=${encodeURIComponent(apiKey)}`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error('Netzwerkfehler: ' + r.status);
+    const json = await r.json();
+    if(json['Error Message']) throw new Error('AlphaVantage Fehler: ' + json['Error Message']);
+    if(json['Note']) throw new Error('AlphaVantage Hinweis: ' + json['Note']);
+    return json;
+  }
+
+  function last365Days(data){
+    // data is sorted ascending
+    const N = data.length;
+    const oneYear = 365;
+    const startIdx = Math.max(0, N - oneYear);
+    return data.slice(startIdx);
+  }
+
+  function calcPosition(params){
+    // params: {portfolio, maxPercent, riskPercent, entryPrice, stopPrice}
+    const {portfolio, maxPercent, riskPercent, entryPrice, stopPrice} = params;
+    // max position (money) = portfolio * maxPercent/100
+    const maxPositionMoney = portfolio * (maxPercent/100);
+    // risk per trade money = portfolio * riskPercent/100
+    const riskMoney = portfolio * (riskPercent/100);
+    // risk per share = entryPrice - stopPrice (absolute)
+    const riskPerShare = Math.abs(entryPrice - stopPrice);
+    let sharesByRisk = 0;
+    if(riskPerShare > 0) sharesByRisk = Math.floor(riskMoney / riskPerShare);
+    const maxSharesBySize = Math.floor(maxPositionMoney / entryPrice);
+    const suggestedShares = Math.max(0, Math.min(sharesByRisk, maxSharesBySize));
+    const suggestedMoney = suggestedShares * entryPrice;
+    return {
+      maxPositionMoney, riskMoney, riskPerShare, sharesByRisk, maxSharesBySize, suggestedShares, suggestedMoney
+    };
+  }
+
+  function displayResult(sym, price, lastUpdate, calc){
+    document.getElementById('symbolDisplay').textContent = sym.toUpperCase();
+    document.getElementById('currentPrice').textContent = formatCurrency(price);
+    document.getElementById('lastUpdate').textContent = lastUpdate || '—';
+    const rt = document.getElementById('resultText');
+    if(calc.suggestedShares <= 0){
+      rt.innerHTML = `<div>Kein Kauf empfohlen mit den aktuellen Parametern.<br/><span class="muted">(Risikobudget oder Max-Positionsgröße zu klein oder Stop-Loss zu nah.)</span></div>`;
+    } else {
+      rt.innerHTML = `
+        <div>Vorgeschlagene Positionsgröße: <strong>${calc.suggestedShares.toLocaleString('de-DE')} Aktien</strong> (= <strong>${formatCurrency(calc.suggestedMoney)}</strong>).</div>
+        <div class="small muted">Max. Positionssumme erlaubt: ${formatCurrency(calc.maxPositionMoney)} (${document.getElementById('maxPercent').value}% vom Depot).</div>
+        <div class="small muted">Risikobudget / Trade: ${formatCurrency(calc.riskMoney)} (${document.getElementById('riskPercent').value}% vom Depot).</div>
+        <div class="small muted">Risiko pro Aktie (Entry − Stop): ${formatCurrency(calc.riskPerShare)}.</div>
+        <div style="margin-top:8px">Beachte: Order-Fees, Slippage und Steuer nicht berücksichtigt. Passe Stop-Loss bewusst an.</div>
+      `;
+    }
+  }
+
+  async function doFetch(){
+    const apiKey = document.getElementById('apikey').value.trim();
+    const symbol = document.getElementById('symbol').value.trim();
+    if(!apiKey){
+      alert('Bitte Alpha Vantage API-Key eintragen.');
+      return;
+    }
+    if(!symbol){
+      alert('Bitte ein Aktienkürzel eingeben.');
+      return;
+    }
+    fetchBtn.disabled = true;
+    fetchBtn.textContent = 'Lade...';
+    try{
+      const json = await fetchAlphaTimeSeries(symbol, apiKey);
+      const series = parseAlphaDaily(json);
+      if(!series || series.length===0) throw new Error('Keine Tagesdaten gefunden.');
+      // restrict to last ~365 trading days
+      const lastYear = last365Days(series);
+      if(!chart) createChart();
+      candleSeries.setData(lastYear);
+
+      // current price = last candle close
+      const latest = lastYear[lastYear.length-1];
+      const price = latest.close;
+      const lastUpdate = latest.time;
+
+      // get user params
+      const portfolio = Number(document.getElementById('portfolio').value) || 0;
+      const maxPercent = Number(document.getElementById('maxPercent').value) || 10;
+      const riskPercent = Number(document.getElementById('riskPercent').value) || 1;
+      const stopType = document.getElementById('stopType').value;
+      const stopValue = Number(document.getElementById('stopValue').value);
+
+      let stopPrice = null;
+      if(stopType==='price'){
+        if(!stopValue) throw new Error('Bitte Stop-Loss Kurs eintragen.');
+        stopPrice = stopValue;
+      } else {
+        if(!stopValue) throw new Error('Bitte Stop-Loss Prozent eintragen.');
+        // stopValue is percent distance from entry (e.g. 5 => stop = entry * (1 - 0.05))
+        stopPrice = price * (1 - (stopValue/100));
+      }
+
+      const calc = calcPosition({
+        portfolio, maxPercent, riskPercent, entryPrice: price, stopPrice
+      });
+
+      displayResult(symbol, price, lastUpdate, calc);
+
+    } catch(e){
+      alert('Fehler: ' + (e.message || e));
+      console.error(e);
+    } finally{
+      fetchBtn.disabled = false;
+      fetchBtn.textContent = 'Abfragen';
+    }
+  }
+
+  fetchBtn.addEventListener('click', doFetch);
+  resetBtn.addEventListener('click', ()=>{
+    document.getElementById('symbol').value = '';
+    document.getElementById('symbolDisplay').textContent = '—';
+    document.getElementById('currentPrice').textContent = '—';
+    document.getElementById('lastUpdate').textContent = '—';
+    document.getElementById('resultText').textContent = 'Noch keine Abfrage.';
+    if(chart) document.getElementById('chart').innerHTML = '';
+    document.getElementById('stopValue').value = '';
+  });
+
+  // create chart immediately so user sees layout
+  createChart();
+
+})();
+</script>
+</body>
+</html>
